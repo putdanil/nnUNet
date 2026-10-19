@@ -8,6 +8,7 @@ from scipy.ndimage import map_coordinates
 from skimage.transform import resize
 
 from nnunetv2.preprocessing.resampling.default_resampling import resample_data_or_seg
+from nnunetv2.utilities.label_handling.label_handling import argmax_over_channels
 
 
 def _legacy_out_of_plane(reshaped_here: np.ndarray, new_shape, order_z: int) -> np.ndarray:
@@ -838,6 +839,48 @@ class TestSegResamplingDefault(unittest.TestCase):
                for tb in ('nearest', 'lowest')}
         self.assertFalse(np.array_equal(got['nearest'], got['lowest']),
                          'seg_tiebreak is not reaching the in-plane resize on the separate-z path')
+
+
+class TestThreadedChannels(unittest.TestCase):
+    """num_threads resamples the channels on threads. The result must not depend on it."""
+
+    def test_threads_match_one_thread(self):
+        rng = np.random.RandomState(1)
+        for _ in range(60):
+            do_separate_z = bool(rng.rand() < 0.5)
+            axis = rng.randint(0, 3) if do_separate_z else None
+            shape = [rng.randint(3, 14) for _ in range(3)]
+            new_shape = [rng.randint(3, 25) for _ in range(3)]
+            is_seg = bool(rng.rand() < 0.3)
+            order = int(rng.choice([0, 1, 3]))
+            n_channels = rng.randint(2, 9)
+            dtype = rng.choice([np.float16, np.float32])
+            data = (rng.randint(0, 4, (n_channels, *shape)).astype(dtype) if is_seg
+                    else rng.randn(n_channels, *shape).astype(dtype))
+            one = resample_data_or_seg(data.copy(), new_shape, is_seg=is_seg, axis=axis, order=order,
+                                       do_separate_z=do_separate_z, order_z=0)
+            for num_threads in (2, 4, 16):
+                got = resample_data_or_seg(data.copy(), new_shape, is_seg=is_seg, axis=axis, order=order,
+                                           do_separate_z=do_separate_z, order_z=0, num_threads=num_threads)
+                self.assertEqual(got.dtype, one.dtype)
+                self.assertTrue(np.array_equal(got, one),
+                                f'{num_threads} threads differ for {shape} -> {new_shape}, separate_z={do_separate_z}, '
+                                f'axis={axis}, is_seg={is_seg}, order={order}, {n_channels} channels')
+
+
+class TestArgmaxOverChannels(unittest.TestCase):
+    def test_matches_numpy_argmax_with_ties_and_nan(self):
+        rng = np.random.RandomState(2)
+        for ndim in (3, 4):
+            for _ in range(30):
+                shape = (rng.randint(1, 6),) + tuple(rng.randint(1, 20) for _ in range(ndim - 1))
+                x = rng.randint(-3, 4, shape).astype(np.float16)  # few values, so most voxels have ties
+                x[rng.rand(*shape) < 0.05] = np.nan
+                expected = x.argmax(0)
+                for num_threads in (1, 2, 8):
+                    got = argmax_over_channels(x, num_threads)
+                    self.assertEqual(got.dtype, expected.dtype)
+                    self.assertTrue(np.array_equal(got, expected), f'{num_threads} threads differ for {shape}')
 
 
 if __name__ == '__main__':

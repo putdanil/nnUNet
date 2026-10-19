@@ -1,4 +1,5 @@
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
 from time import time
 from typing import Union, List, Tuple, Type
 
@@ -16,6 +17,26 @@ from typing import TYPE_CHECKING
 # see https://adamj.eu/tech/2021/05/13/python-type-hints-how-to-fix-circular-imports/
 if TYPE_CHECKING:
     from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, ConfigurationManager
+
+
+def argmax_over_channels(x: np.ndarray, num_threads: int = 1) -> np.ndarray:
+    """
+    x.argmax(0) for x of shape (c, x, y(, z)), computed on threads over slabs of the first spatial axis.
+    Every voxel is reduced exactly as in a single argmax call, so the result is bit-identical, ties and nan
+    included. x.argmax(0) on its own runs on one thread and first copies all of x into a transposed buffer;
+    a slab only copies its own part.
+    """
+    if num_threads <= 1 or x.ndim < 2 or x.shape[1] < 2:
+        return x.argmax(0)
+    out = np.empty(x.shape[1:], dtype=np.intp)
+    bounds = np.linspace(0, x.shape[1], min(x.shape[1], 4 * num_threads) + 1).astype(int)
+
+    def argmax_slab(i):
+        out[bounds[i]:bounds[i + 1]] = x[:, bounds[i]:bounds[i + 1]].argmax(0)
+
+    with ThreadPoolExecutor(num_threads) as executor:
+        list(executor.map(argmax_slab, range(len(bounds) - 1)))
+    return out
 
 
 class LabelManager(object):
@@ -175,7 +196,7 @@ class LabelManager(object):
             is_numpy = isinstance(predicted_probabilities, np.ndarray)
             if not is_numpy:
                 predicted_probabilities = predicted_probabilities.numpy()
-            segmentation = predicted_probabilities.argmax(0)
+            segmentation = argmax_over_channels(predicted_probabilities, torch.get_num_threads())
             if not is_numpy:
                 segmentation = torch.from_numpy(segmentation)
 

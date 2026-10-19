@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from typing import Union, Tuple, List
 
@@ -95,9 +96,10 @@ def resample_data_or_seg_to_shape(data: Union[torch.Tensor, np.ndarray],
                                   order: int = 3, order_z: int = 0,
                                   force_separate_z: Union[bool, None] = False,
                                   separate_z_anisotropy_threshold: float = ANISO_THRESHOLD,
-                                  *, seg_tiebreak: str = 'nearest'):
+                                  *, seg_tiebreak: str = 'nearest', num_threads: int = 1):
     """
     needed for segmentation export. Stupid, I know
+    num_threads: see resample_data_or_seg
     """
     if isinstance(data, torch.Tensor):
         data = data.numpy()
@@ -109,7 +111,7 @@ def resample_data_or_seg_to_shape(data: Union[torch.Tensor, np.ndarray],
         assert data.ndim == 4, "data must be c x y z"
 
     data_reshaped = resample_data_or_seg(data, new_shape, is_seg, axis, order, do_separate_z, order_z=order_z,
-                                         seg_tiebreak=seg_tiebreak)
+                                         seg_tiebreak=seg_tiebreak, num_threads=num_threads)
     return data_reshaped
 
 
@@ -120,7 +122,7 @@ def resample_data_or_seg_to_shape(data: Union[torch.Tensor, np.ndarray],
 def resample_data_or_seg(data: np.ndarray, new_shape: Union[Tuple[float, ...], List[float], np.ndarray],
                          is_seg: bool = False, axis: Union[None, int] = None, order: int = 3,
                          do_separate_z: bool = False, order_z: int = 0, dtype_out = None,
-                         *, seg_tiebreak: str = 'nearest'):
+                         *, seg_tiebreak: str = 'nearest', num_threads: int = 1):
     """
     separate_z=True will resample with order 0 along z
     :param data:
@@ -135,6 +137,9 @@ def resample_data_or_seg(data: np.ndarray, new_shape: Union[Tuple[float, ...], L
     'nearest' takes the nearest neighbour label, which is the only choice that is a function of the
     geometry rather than of the label values; 'lowest' and 'highest' keep the smallest or largest label.
     See batchgenerators.augmentations.utils.resize_segmentation.
+    :param num_threads: resample this many channels at once, on threads. The channels are independent and
+    scipy.ndimage releases the GIL, so the result is bit-identical for any value. Each thread holds one
+    resampled channel (float32 at new_shape) until it is copied into the output.
     :return:
     """
     assert data.ndim == 4, "data must be (c, x, y, z)"
@@ -172,7 +177,7 @@ def resample_data_or_seg(data: np.ndarray, new_shape: Union[Tuple[float, ...], L
             else:
                 new_shape_2d = new_shape[:-1]
 
-            for c in range(data.shape[0]):
+            def resample_channel(c):
                 tmp = deepcopy(new_shape)
                 tmp[axis] = shape[axis]
                 reshaped_here = np.zeros(tmp, dtype=data.dtype)
@@ -228,8 +233,15 @@ def resample_data_or_seg(data: np.ndarray, new_shape: Union[Tuple[float, ...], L
                 else:
                     reshaped_final[c] = reshaped_here
         else:
-            for c in range(data.shape[0]):
+            def resample_channel(c):
                 reshaped_final[c] = resize_fn(data[c], new_shape, order, **kwargs)
+
+        if num_threads > 1 and data.shape[0] > 1:
+            with ThreadPoolExecutor(min(num_threads, data.shape[0])) as executor:
+                list(executor.map(resample_channel, range(data.shape[0])))
+        else:
+            for c in range(data.shape[0]):
+                resample_channel(c)
         return reshaped_final
     else:
         # print("no resampling necessary")

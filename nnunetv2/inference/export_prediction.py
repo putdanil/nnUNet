@@ -6,6 +6,7 @@ from acvl_utils.cropping_and_padding.bounding_boxes import insert_crop_into_imag
 from batchgenerators.utilities.file_and_folder_operations import load_json, save_pickle
 
 from nnunetv2.configuration import default_num_processes
+from nnunetv2.preprocessing.resampling.default_resampling import resample_data_or_seg_to_shape
 from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetBlosc2, comp_blosc2_params
 from nnunetv2.utilities.label_handling.label_handling import LabelManager
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, ConfigurationManager
@@ -27,10 +28,15 @@ def convert_predicted_logits_to_segmentation_with_correct_shape(predicted_logits
         len(configuration_manager.spacing) == \
         len(properties_dict['shape_after_cropping_and_before_resampling']) else \
         [spacing_transposed[0], *configuration_manager.spacing]
-    predicted_logits = configuration_manager.resampling_fn_probabilities(predicted_logits,
-                                            properties_dict['shape_after_cropping_and_before_resampling'],
-                                            current_spacing,
-                                            [properties_dict['spacing'][i] for i in plans_manager.transpose_forward])
+    resampling_fn = configuration_manager.resampling_fn_probabilities
+    # the default resampling does the channels on threads (bit-identical); other functions keep their own threading
+    resampling_kwargs = {'num_threads': num_threads_torch} \
+        if getattr(resampling_fn, 'func', None) is resample_data_or_seg_to_shape else {}
+    predicted_logits = resampling_fn(predicted_logits,
+                                     properties_dict['shape_after_cropping_and_before_resampling'],
+                                     current_spacing,
+                                     [properties_dict['spacing'][i] for i in plans_manager.transpose_forward],
+                                     **resampling_kwargs)
     # return value of resampling_fn_probabilities can be ndarray or Tensor but that does not matter because
     # apply_inference_nonlin will convert to torch
     if not return_probabilities:
