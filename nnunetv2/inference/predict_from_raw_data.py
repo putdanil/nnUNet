@@ -1,3 +1,4 @@
+import gc
 import inspect
 import itertools
 import warnings
@@ -899,6 +900,9 @@ def predict_entry_point_modelfolder():
     else:
         device = torch.device('mps')
 
+    # freeze the long-lived objects of the imports and the model, see predict_entry_point
+    gc.freeze()
+    gc.disable()
     predictor = nnUNetPredictor(tile_step_size=args.step_size,
                                 use_gaussian=True,
                                 use_mirroring=not args.disable_tta,
@@ -908,6 +912,8 @@ def predict_entry_point_modelfolder():
                                 allow_tqdm=not args.disable_progress_bar,
                                 verbose_preprocessing=args.verbose)
     predictor.initialize_from_trained_model_folder(args.m, args.f, args.chk)
+    gc.freeze()
+    gc.enable()
     predictor.predict_from_files(args.i, args.o, save_probabilities=args.save_probabilities,
                                  overwrite=not args.continue_prediction,
                                  num_processes_preprocessing=args.npp,
@@ -1018,6 +1024,12 @@ def predict_entry_point():
     else:
         device = torch.device('mps')
 
+    # The imports and the model leave several hundred thousand long-lived objects (torch, nnU-Net and every trainer
+    # module), and each full collection of the cyclic garbage collector walks all of them, while the model loads
+    # and again at interpreter exit. Freeze them, so that later collections only look at what the prediction
+    # creates. This is the command line only; nnUNetPredictor leaves the garbage collector alone.
+    gc.freeze()
+    gc.disable()
     predictor = nnUNetPredictor(tile_step_size=args.step_size,
                                 use_gaussian=True,
                                 use_mirroring=not args.disable_tta,
@@ -1031,6 +1043,8 @@ def predict_entry_point():
         args.f,
         checkpoint_name=args.chk
     )
+    gc.freeze()
+    gc.enable()
 
     run_sequential = args.nps == 0 and args.npp == 0
 
